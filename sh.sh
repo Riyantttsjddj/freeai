@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# Instalasi dependensi
+# Update dan install Node.js + npm
 apt update -y
 apt install -y nodejs npm curl
 
-# Buat direktori untuk project
+# Buat direktori project
 mkdir -p /opt/chatgpt-mini
 cd /opt/chatgpt-mini
 
@@ -14,38 +14,27 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-const chatHistory = [];
-
 const server = http.createServer((req, res) => {
-    if (req.url === '/') {
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        return res.end(fs.readFileSync(path.join(__dirname, 'index.html')));
-    } else if (req.url === '/script.js') {
-        res.writeHead(200, { 'Content-Type': 'application/javascript' });
-        return res.end(fs.readFileSync(path.join(__dirname, 'script.js')));
-    } else if (req.url === '/history') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify(chatHistory));
-    } else if (req.method === 'POST' && req.url === '/chat') {
-        let body = '';
-        req.on('data', chunk => body += chunk);
-        req.on('end', () => {
-            const { message } = JSON.parse(body);
-            global.puter.ai.chat(message).then(reply => {
-                chatHistory.push({ prompt: message, reply });
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ reply }));
-            });
-        });
-    } else {
-        res.writeHead(404);
-        res.end('Not found');
-    }
+    let filePath = path.join(__dirname, req.url === '/' ? 'index.html' : req.url);
+    const extname = String(path.extname(filePath)).toLowerCase();
+    const mimeTypes = {
+        '.html': 'text/html',
+        '.js': 'application/javascript',
+        '.css': 'text/css',
+    };
+
+    fs.readFile(filePath, (error, content) => {
+        if (error) {
+            res.writeHead(404);
+            res.end('Not found');
+        } else {
+            res.writeHead(200, { 'Content-Type': mimeTypes[extname] || 'application/octet-stream' });
+            res.end(content, 'utf-8');
+        }
+    });
 });
 
-server.listen(3000, () => console.log('Server berjalan di port 3000'));
-
-global.puter = require('puter-ai');
+server.listen(3000, () => console.log('ChatGPT Mini berjalan di port 3000'));
 EOF
 
 # Buat file index.html
@@ -74,27 +63,25 @@ cat <<'EOF' > index.html
         <input id="input" type="text" placeholder="Ask me anything..." style="width: 80%;">
         <button onclick="send()">Send</button>
     </div>
-    <script src="script.js"></script>
+
+    <script src="https://js.puter.com/v2/"></script>
+    <script src="/script.js"></script>
 </body>
 </html>
 EOF
 
 # Buat file script.js
 cat <<'EOF' > script.js
-async function send() {
+function send() {
     const input = document.getElementById('input');
     const msg = input.value;
     if (!msg) return;
     appendMessage("You", msg);
     input.value = "";
 
-    const res = await fetch('/chat', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ message: msg })
+    puter.ai.chat(msg).then(reply => {
+        appendReply(reply);
     });
-    const data = await res.json();
-    appendReply(data.reply);
 }
 
 function appendMessage(sender, text) {
@@ -124,9 +111,6 @@ function copyText(id) {
 }
 EOF
 
-# Instalasi modul
-npm install puter-ai
-
 # Buat systemd service
 cat <<EOF > /etc/systemd/system/chatgpt-mini.service
 [Unit]
@@ -144,12 +128,12 @@ WorkingDirectory=/opt/chatgpt-mini
 WantedBy=multi-user.target
 EOF
 
-# Reload systemd dan jalankan service
+# Aktifkan dan jalankan service
 systemctl daemon-reexec
 systemctl daemon-reload
 systemctl enable chatgpt-mini
 systemctl start chatgpt-mini
 
-# Tampilkan IP publik
+# Tampilkan IP Publik
 IP=$(curl -s ifconfig.me)
-echo "Akses ChatGPT Mini melalui: http://$IP:3000"
+echo "ChatGPT Mini siap diakses di: http://$IP:3000"
