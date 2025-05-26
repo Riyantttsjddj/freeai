@@ -8,7 +8,7 @@ rm -f /etc/systemd/system/chatgpt-mini.service
 
 echo "[*] Update & install dependensi..."
 apt update -y
-apt install -y nodejs npm sqlite3 curl
+apt install -y nodejs npm curl
 
 echo "[*] Setup folder project..."
 mkdir -p /opt/chatgpt-mini-full
@@ -16,33 +16,23 @@ cd /opt/chatgpt-mini-full
 
 echo "[*] Inisialisasi project Node.js..."
 npm init -y
-npm install express express-session better-sqlite3 body-parser
+npm install express express-session body-parser
 
-echo "[*] Membuat database dan file schema..."
+echo "[*] Membuat penyimpanan memori JSON..."
 cat <<EOF > db.js
-const Database = require('better-sqlite3');
-const db = new Database('chat.db');
+const fs = require('fs');
+const FILE = 'data.json';
 
-// Membuat tabel jika belum ada
-db.prepare(\`
-CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  username TEXT UNIQUE,
-  password TEXT
-);
-\`).run();
+let data = { users: [], messages: {} };
+if (fs.existsSync(FILE)) {
+  try { data = JSON.parse(fs.readFileSync(FILE)); } catch {}
+}
 
-db.prepare(\`
-CREATE TABLE IF NOT EXISTS messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user TEXT,
-  message TEXT,
-  reply TEXT,
-  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-\`).run();
+function saveData() {
+  fs.writeFileSync(FILE, JSON.stringify(data, null, 2));
+}
 
-module.exports = db;
+module.exports = { data, saveData };
 EOF
 
 echo "[*] Membuat server Express..."
@@ -50,8 +40,8 @@ cat <<EOF > server.js
 const express = require('express');
 const session = require('express-session');
 const bodyParser = require('body-parser');
-const db = require('./db');
 const path = require('path');
+const { data, saveData } = require('./db');
 
 const app = express();
 const PORT = 3000;
@@ -77,9 +67,9 @@ app.get('/', auth, (req, res) => {
 
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
-  const user = db.prepare('SELECT * FROM users WHERE username=? AND password=?').get(username, password);
+  const user = data.users.find(u => u.username === username && u.password === password);
   if (user) {
-    req.session.user = user.username;
+    req.session.user = username;
     res.redirect('/');
   } else {
     res.send('Login gagal. <a href="/login.html">Coba lagi</a>');
@@ -88,11 +78,12 @@ app.post('/login', (req, res) => {
 
 app.post('/register', (req, res) => {
   const { username, password } = req.body;
-  try {
-    db.prepare('INSERT INTO users (username, password) VALUES (?, ?)').run(username, password);
-    res.send('Pendaftaran berhasil. <a href="/login.html">Login</a>');
-  } catch (e) {
+  if (data.users.some(u => u.username === username)) {
     res.send('Username sudah terdaftar. <a href="/login.html">Login</a>');
+  } else {
+    data.users.push({ username, password });
+    saveData();
+    res.send('Pendaftaran berhasil. <a href="/login.html">Login</a>');
   }
 });
 
@@ -101,27 +92,38 @@ app.get('/logout', (req, res) => {
   res.redirect('/login.html');
 });
 
-app.post('/chat', auth, async (req, res) => {
+app.post('/chat', auth, (req, res) => {
+  const user = req.session.user;
   const msg = req.body.message;
-  const reply = `AI: ${msg.split('').reverse().join('')} (simulasi)`; // simulasi
-  db.prepare('INSERT INTO messages (user, message, reply) VALUES (?, ?, ?)').run(req.session.user, msg, reply);
+
+  if (!data.messages[user]) data.messages[user] = [];
+
+  // Ambil 3 chat terakhir
+  const last = data.messages[user].slice(-3).map(m => \`You: \${m.message}\\nAI: \${m.reply}\`).join('\\n');
+  const context = \`\${last}\\nYou: \${msg}\`;
+
+  // Simulasi balasan AI
+  const reply = \`\${msg.split('').reverse().join('')} (berdasarkan konteks)\`;
+
+  data.messages[user].push({ message: msg, reply, timestamp: new Date().toISOString() });
+  saveData();
+
   res.json({ reply });
 });
 
 app.get('/history', auth, (req, res) => {
-  const rows = db.prepare('SELECT message, reply, timestamp FROM messages WHERE user=? ORDER BY timestamp DESC LIMIT 20').all(req.session.user);
-  res.json(rows);
+  const user = req.session.user;
+  res.json((data.messages[user] || []).slice(-20).reverse());
 });
 
 app.listen(PORT, () => {
-  console.log(`Server berjalan di http://0.0.0.0:${PORT}`);
+  console.log(\`Server aktif di http://0.0.0.0:\${PORT}\`);
 });
 EOF
 
-echo "[*] Membuat halaman login dan chat..."
+echo "[*] Membuat halaman login dan register..."
 cat <<EOF > login.html
-<!DOCTYPE html>
-<html><body>
+<!DOCTYPE html><html><body>
 <h2>Login</h2>
 <form action="/login" method="post">
   Username: <input name="username"><br>
@@ -133,8 +135,7 @@ cat <<EOF > login.html
 EOF
 
 cat <<EOF > register.html
-<!DOCTYPE html>
-<html><body>
+<!DOCTYPE html><html><body>
 <h2>Daftar</h2>
 <form action="/register" method="post">
   Username: <input name="username"><br>
@@ -148,24 +149,22 @@ cat <<'EOF' > index.html
 <!DOCTYPE html>
 <html>
 <head>
-  <title>ChatGPT Mini Full</title>
+  <title>ChatGPT Mini</title>
   <style>
     body { font-family: sans-serif; padding: 20px; }
     pre { background: #f0f0f0; padding: 10px; border-radius: 6px; position: relative; }
-    .copy-btn { position: absolute; top: 10px; right: 10px; background: #ccc; border: none; cursor: pointer; padding: 5px; }
+    .copy-btn { position: absolute; top: 10px; right: 10px; background: #ccc; border: none; cursor: pointer; }
   </style>
 </head>
 <body>
-  <h1>ChatGPT Mini Full</h1>
+  <h1>ChatGPT Mini</h1>
   <a href="/logout">Logout</a>
   <div id="history"></div>
   <input id="msg" placeholder="Tulis pertanyaan..." style="width: 70%;">
   <button onclick="send()">Kirim</button>
   <script>
     fetch('/history').then(res => res.json()).then(data => {
-      for (const h of data.reverse()) {
-        append(h.message, h.reply);
-      }
+      for (const h of data) append(h.message, h.reply);
     });
 
     function send() {
@@ -192,7 +191,7 @@ EOF
 echo "[*] Membuat systemd service..."
 cat <<EOF > /etc/systemd/system/chatgpt-mini.service
 [Unit]
-Description=ChatGPT Mini Full
+Description=ChatGPT Mini JSON Mode
 After=network.target
 
 [Service]
@@ -206,13 +205,12 @@ WorkingDirectory=/opt/chatgpt-mini-full
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reexec
 systemctl daemon-reload
 systemctl enable chatgpt-mini
 systemctl start chatgpt-mini
 
 IP=$(curl -s ifconfig.me)
 echo "========================================="
-echo "ChatGPT Mini Full aktif!"
+echo "ChatGPT Mini dengan memori aktif!"
 echo "Akses di: http://$IP:3000/login.html"
 echo "========================================="
