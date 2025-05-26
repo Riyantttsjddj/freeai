@@ -1,139 +1,218 @@
 #!/bin/bash
 
-# Update dan install Node.js + npm
+echo "[*] Membersihkan instalasi sebelumnya..."
+systemctl stop chatgpt-mini 2>/dev/null
+systemctl disable chatgpt-mini 2>/dev/null
+rm -rf /opt/chatgpt-mini-full
+rm -f /etc/systemd/system/chatgpt-mini.service
+
+echo "[*] Update & install dependensi..."
 apt update -y
-apt install -y nodejs npm curl
+apt install -y nodejs npm sqlite3 curl
 
-# Buat direktori project
-mkdir -p /opt/chatgpt-mini
-cd /opt/chatgpt-mini
+echo "[*] Setup folder project..."
+mkdir -p /opt/chatgpt-mini-full
+cd /opt/chatgpt-mini-full
 
-# Buat file server.js
-cat <<'EOF' > server.js
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
+echo "[*] Inisialisasi project Node.js..."
+npm init -y
+npm install express express-session better-sqlite3 body-parser
 
-const server = http.createServer((req, res) => {
-    let filePath = path.join(__dirname, req.url === '/' ? 'index.html' : req.url);
-    const extname = String(path.extname(filePath)).toLowerCase();
-    const mimeTypes = {
-        '.html': 'text/html',
-        '.js': 'application/javascript',
-        '.css': 'text/css',
-    };
+echo "[*] Membuat database dan file schema..."
+cat <<EOF > db.js
+const Database = require('better-sqlite3');
+const db = new Database('chat.db');
 
-    fs.readFile(filePath, (error, content) => {
-        if (error) {
-            res.writeHead(404);
-            res.end('Not found');
-        } else {
-            res.writeHead(200, { 'Content-Type': mimeTypes[extname] || 'application/octet-stream' });
-            res.end(content, 'utf-8');
-        }
-    });
-});
+// Membuat tabel jika belum ada
+db.prepare(\`
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT UNIQUE,
+  password TEXT
+);
+\`).run();
 
-server.listen(3000, () => console.log('ChatGPT Mini berjalan di port 3000'));
+db.prepare(\`
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user TEXT,
+  message TEXT,
+  reply TEXT,
+  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+\`).run();
+
+module.exports = db;
 EOF
 
-# Buat file index.html
+echo "[*] Membuat server Express..."
+cat <<EOF > server.js
+const express = require('express');
+const session = require('express-session');
+const bodyParser = require('body-parser');
+const db = require('./db');
+const path = require('path');
+
+const app = express();
+const PORT = 3000;
+
+app.use(express.static(__dirname));
+app.use(bodyParser.urlencoded({ extended: false }));
+app.use(bodyParser.json());
+
+app.use(session({
+  secret: 'secret123',
+  resave: false,
+  saveUninitialized: true
+}));
+
+function auth(req, res, next) {
+  if (req.session.user) next();
+  else res.redirect('/login.html');
+}
+
+app.get('/', auth, (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+app.post('/login', (req, res) => {
+  const { username, password } = req.body;
+  const user = db.prepare('SELECT * FROM users WHERE username=? AND password=?').get(username, password);
+  if (user) {
+    req.session.user = user.username;
+    res.redirect('/');
+  } else {
+    res.send('Login gagal. <a href="/login.html">Coba lagi</a>');
+  }
+});
+
+app.post('/register', (req, res) => {
+  const { username, password } = req.body;
+  try {
+    db.prepare('INSERT INTO users (username, password) VALUES (?, ?)').run(username, password);
+    res.send('Pendaftaran berhasil. <a href="/login.html">Login</a>');
+  } catch (e) {
+    res.send('Username sudah terdaftar. <a href="/login.html">Login</a>');
+  }
+});
+
+app.get('/logout', (req, res) => {
+  req.session.destroy();
+  res.redirect('/login.html');
+});
+
+app.post('/chat', auth, async (req, res) => {
+  const msg = req.body.message;
+  const reply = `AI: ${msg.split('').reverse().join('')} (simulasi)`; // simulasi
+  db.prepare('INSERT INTO messages (user, message, reply) VALUES (?, ?, ?)').run(req.session.user, msg, reply);
+  res.json({ reply });
+});
+
+app.get('/history', auth, (req, res) => {
+  const rows = db.prepare('SELECT message, reply, timestamp FROM messages WHERE user=? ORDER BY timestamp DESC LIMIT 20').all(req.session.user);
+  res.json(rows);
+});
+
+app.listen(PORT, () => {
+  console.log(`Server berjalan di http://0.0.0.0:${PORT}`);
+});
+EOF
+
+echo "[*] Membuat halaman login dan chat..."
+cat <<EOF > login.html
+<!DOCTYPE html>
+<html><body>
+<h2>Login</h2>
+<form action="/login" method="post">
+  Username: <input name="username"><br>
+  Password: <input name="password" type="password"><br>
+  <button type="submit">Login</button>
+</form>
+<p>Belum punya akun? <a href="/register.html">Daftar</a></p>
+</body></html>
+EOF
+
+cat <<EOF > register.html
+<!DOCTYPE html>
+<html><body>
+<h2>Daftar</h2>
+<form action="/register" method="post">
+  Username: <input name="username"><br>
+  Password: <input name="password" type="password"><br>
+  <button type="submit">Daftar</button>
+</form>
+</body></html>
+EOF
+
 cat <<'EOF' > index.html
 <!DOCTYPE html>
 <html>
 <head>
-    <title>ChatGPT Mini</title>
-    <style>
-        body { font-family: sans-serif; margin: 40px; }
-        #chat { max-width: 600px; margin: auto; }
-        .msg { margin: 10px 0; }
-        .reply pre { background: #f4f4f4; padding: 10px; border-radius: 6px; position: relative; }
-        .copy-btn {
-            position: absolute;
-            top: 10px; right: 10px;
-            background: #ddd; border: none;
-            padding: 5px; cursor: pointer;
-        }
-    </style>
+  <title>ChatGPT Mini Full</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    pre { background: #f0f0f0; padding: 10px; border-radius: 6px; position: relative; }
+    .copy-btn { position: absolute; top: 10px; right: 10px; background: #ccc; border: none; cursor: pointer; padding: 5px; }
+  </style>
 </head>
 <body>
-    <div id="chat">
-        <h1>ChatGPT Mini</h1>
-        <div id="messages"></div>
-        <input id="input" type="text" placeholder="Ask me anything..." style="width: 80%;">
-        <button onclick="send()">Send</button>
-    </div>
+  <h1>ChatGPT Mini Full</h1>
+  <a href="/logout">Logout</a>
+  <div id="history"></div>
+  <input id="msg" placeholder="Tulis pertanyaan..." style="width: 70%;">
+  <button onclick="send()">Kirim</button>
+  <script>
+    fetch('/history').then(res => res.json()).then(data => {
+      for (const h of data.reverse()) {
+        append(h.message, h.reply);
+      }
+    });
 
-    <script src="https://js.puter.com/v2/"></script>
-    <script src="/script.js"></script>
+    function send() {
+      const msg = document.getElementById('msg').value;
+      if (!msg) return;
+      fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: msg })
+      })
+      .then(res => res.json())
+      .then(data => append(msg, data.reply));
+    }
+
+    function append(q, a) {
+      const div = document.getElementById('history');
+      div.innerHTML += `<p><b>You:</b> ${q}</p><pre>${a}</pre>`;
+    }
+  </script>
 </body>
 </html>
 EOF
 
-# Buat file script.js
-cat <<'EOF' > script.js
-function send() {
-    const input = document.getElementById('input');
-    const msg = input.value;
-    if (!msg) return;
-    appendMessage("You", msg);
-    input.value = "";
-
-    puter.ai.chat(msg).then(reply => {
-        appendReply(reply);
-    });
-}
-
-function appendMessage(sender, text) {
-    const div = document.getElementById('messages');
-    const msgDiv = document.createElement('div');
-    msgDiv.className = 'msg';
-    msgDiv.innerHTML = `<strong>${sender}:</strong> ${text}`;
-    div.appendChild(msgDiv);
-}
-
-function appendReply(text) {
-    const div = document.getElementById('messages');
-    const msgDiv = document.createElement('div');
-    msgDiv.className = 'msg reply';
-    const id = Math.random().toString(36).substr(2, 9);
-    msgDiv.innerHTML = `
-        <pre id="code-${id}">${text}</pre>
-        <button class="copy-btn" onclick="copyText('${id}')">Copy</button>
-    `;
-    div.appendChild(msgDiv);
-}
-
-function copyText(id) {
-    const text = document.getElementById('code-' + id).innerText;
-    navigator.clipboard.writeText(text);
-    alert("Copied to clipboard!");
-}
-EOF
-
-# Buat systemd service
+echo "[*] Membuat systemd service..."
 cat <<EOF > /etc/systemd/system/chatgpt-mini.service
 [Unit]
-Description=ChatGPT Mini
+Description=ChatGPT Mini Full
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/node /opt/chatgpt-mini/server.js
+ExecStart=/usr/bin/node /opt/chatgpt-mini-full/server.js
 Restart=always
 User=root
 Environment=NODE_ENV=production
-WorkingDirectory=/opt/chatgpt-mini
+WorkingDirectory=/opt/chatgpt-mini-full
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Aktifkan dan jalankan service
 systemctl daemon-reexec
 systemctl daemon-reload
 systemctl enable chatgpt-mini
 systemctl start chatgpt-mini
 
-# Tampilkan IP Publik
 IP=$(curl -s ifconfig.me)
-echo "ChatGPT Mini siap diakses di: http://$IP:3000"
+echo "========================================="
+echo "ChatGPT Mini Full aktif!"
+echo "Akses di: http://$IP:3000/login.html"
+echo "========================================="
